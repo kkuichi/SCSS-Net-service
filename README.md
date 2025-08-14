@@ -3,12 +3,6 @@
 A Python project for segmenting and analyzing solar coronal structures using deep learning.  
 Includes a Flask API backend and a client for interacting with the service.
 
-## Project Structure
-
-project-root/ │ ├── service/ # Flask API backend 
-│ ├── app.py │ ├── models/ │ └── ... │ ├── client/ # API client or frontend │ ├── client.py │ └── ... │ ├── requirements.txt └── README.md
-
-
 ## Features
 
 - Deep learning segmentation of solar images (Active Regions, Coronal Holes)
