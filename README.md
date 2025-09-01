@@ -32,14 +32,21 @@ Includes a Flask API backend and a client for interacting with the service.
    
 ## Usage
 
-1. **Start the Flask API server:**
+1. **Start the back-end service:**
    ```bash
    cd service
     python service/app.py
    ```
 The API will be available at http://localhost:5000.
 
-2. **Use the client to interact with the API:**
+2. **Start the FITS conversion service:**
+   ```bash
+   cd service
+    python service/conver_fits.py
+   ```
+The API will be available at http://localhost:5500.
+
+3. **Use the client to interact with the API:**
    - If using a web client, run:
      ```bash
      cd flask-client

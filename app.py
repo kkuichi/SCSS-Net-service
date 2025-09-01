@@ -379,7 +379,7 @@ def plot_structures(generator, mask, image, instrument: str, data: dict):
     overlay[..., 0] = mask_bin  # Red channel for holes
     axs[2].imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
     axs[2].imshow(overlay, alpha=0.5)
-    axs[2].set_title('Image with Holes')
+    axs[2].set_title('Image with detected structures')
     axs[2].axis('off')
 
     # Annotate holes
