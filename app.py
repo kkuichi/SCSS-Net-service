@@ -274,9 +274,16 @@ def analyze_structures(image, pred_bin, instrument: str, date, time) -> dict:
     t = Time(dt.isoformat(), scale='utc')
     B0_deg = B0(t).value
     P_deg  = P(t).value
+    B0_rad = np.radians(B0_deg) #nove
+    P_rad = np.radians(P_deg) #nove
 
     # load image and mask
     img = image.squeeze().cpu().numpy()
+
+    #image_bytes = image.squeeze().cpu().numpy()
+    #nparr = np.frombuffer(image_bytes, np.uint8)
+    #img = cv2.imdecode(img, cv2.IMREAD_GRAYSCALE) # updated grayscaling
+
     mask = pred_bin.squeeze().cpu().numpy()
 
     if img is None or mask is None:
@@ -284,43 +291,97 @@ def analyze_structures(image, pred_bin, instrument: str, date, time) -> dict:
     mask_bin = (mask > 0).astype(np.uint8)
 
     # detect solar disk
-    if instrument.lower() == 'aia':
-        cx, cy, r_px = detect_aia_disk_hough(img)
+    #if instrument.lower() == 'aia':
+    #    cx, cy, r_px = detect_aia_disk_hough(img)
+    #else:
+    #    cx, cy, r_px = detect_suvi_disk_precise(img)
+    #    r_px *= shrink_factor_suvi
+
+    # new detection of solar disk
+
+    inst_lower = instrument.lower()
+    if inst_lower == 'aia':
+        res = detect_aia_disk_hough(img)
     else:
-        cx, cy, r_px = detect_suvi_disk_precise(img)
+        res = detect_suvi_disk_precise(img)
+
+    if res is None:
+        raise ValueError("Solar disk not detected.")
+
+    cx, cy, r_px = res
+    if inst_lower != 'aia':
+        # Kalibračné zmenšenie SUVI polomeru (ovplyvní scale/metry)
         r_px *= shrink_factor_suvi
+
+    if r_px <= 0:
+        raise ValueError(f"Detected non-positive radius r_px={r_px}")
+
+    # pixels -> Mm
     scale = R_SUN_Mm / r_px  # Mm per pixel
 
     # morphological cleaning
     m_closed = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, close_kernel)
-    m_proc   = cv2.morphologyEx(m_closed, cv2.MORPH_OPEN,  open_kernel)
+    m_opened = cv2.morphologyEx(m_closed, cv2.MORPH_OPEN, open_kernel) #added
+    m_proc = (m_opened > 0).astype(np.uint8)
+    # m_proc   = cv2.morphologyEx(m_closed, cv2.MORPH_OPEN,  open_kernel)
 
     # label and filter small
     labeled = label(m_proc, connectivity=2)
+
     holes = []
     for prop in regionprops(labeled):
         if prop.area < min_area_px:
             continue
+
         # compute metrics
-        area_mm2 = prop.area * scale**2
-        cy_px, cx_px = prop.centroid
-        x_mm = (cx_px - cx) * scale
-        y_mm = (cy   - cy_px) * scale
+        # area_mm2 = prop.area * scale**2
+        # cy_px, cx_px = prop.centroid
+        # x_mm = (cx_px - cx) * scale
+        # y_mm = (cy   - cy_px) * scale
         # correct for tilt and compute heliographic coords
-        B0_rad = np.radians(B0_deg)
-        P_rad  = np.radians(P_deg)
-        xp =  x_mm * np.cos(P_rad) + y_mm * np.sin(P_rad)
+        # B0_rad = np.radians(B0_deg)
+        # P_rad  = np.radians(P_deg)
+        # xp =  x_mm * np.cos(P_rad) + y_mm * np.sin(P_rad)
+        # yp = -x_mm * np.sin(P_rad) + y_mm * np.cos(P_rad)
+        # lat_rad = np.arcsin(yp / R_SUN_Mm) + B0_rad
+        # cos_lat = np.cos(lat_rad)
+        # lon_rad = np.arcsin(xp / (R_SUN_Mm * cos_lat))
+        # lat_deg = np.degrees(lat_rad)
+        # lon_deg = np.degrees(lon_rad)
+
+        # regionprops centroid: (row=y, col=x)
+        cy_px_label, cx_px_label = prop.centroid
+        x_mm = (cx_px_label - cx) * scale  # +x doprava
+        y_mm = (cy - cy_px_label) * scale  # +y nahor (invert Y osi obrazu)
+
+        # rotácia o P (slnečný sever hore)
+        xp = x_mm * np.cos(P_rad) + y_mm * np.sin(P_rad)
         yp = -x_mm * np.sin(P_rad) + y_mm * np.cos(P_rad)
-        lat_rad = np.arcsin(yp / R_SUN_Mm) + B0_rad
-        cos_lat = np.cos(lat_rad)
-        lon_rad = np.arcsin(xp / (R_SUN_Mm * cos_lat))
-        lat_deg = np.degrees(lat_rad)
-        lon_deg = np.degrees(lon_rad)
+
+        # normalizované súradnice (v polomeroch Slnka)
+        x1 = xp / R_SUN_Mm
+        y1 = yp / R_SUN_Mm
+
+        # vzdialenosť od stredu na disku; ochrana proti numerike
+        rho2 = np.clip(x1 * x1 + y1 * y1, 0.0, 1.0)
+        z = np.sqrt(1.0 - rho2)  # "hĺbka" (cos uhlovej vzdialenosti)
+
+        # Stonyhurst latitude
+        lat_rad = np.arcsin(z * np.sin(B0_rad) + y1 * np.cos(B0_rad))
+
+        # CMD (central meridian distance), západ kladný; plný rozsah cez atan2
+        num = x1
+        den = z * np.cos(B0_rad) - y1 * np.sin(B0_rad)
+        lon_cmd_rad = np.arctan2(num, den)
+
+        lat_deg = float(np.degrees(lat_rad))
+        lon_deg = float(np.degrees(lon_cmd_rad))
+
 
         holes.append({
             'label':       int(prop.label),
-            'area_mm2':    float(area_mm2),
-            'centroid_px': [float(cx_px), float(cy_px)],
+            'area_mm2':    float(prop.area * scale**2),
+            'centroid_px': [float(cx_px_label), float(cy_px_label)],
             'offset_Mm':   [float(x_mm), float(y_mm)],
             'latitude':    float(lat_deg),
             'longitude':   float(lon_deg)
@@ -332,6 +393,7 @@ def analyze_structures(image, pred_bin, instrument: str, date, time) -> dict:
         'instrument':   instrument,
         'B0_deg':       float(B0_deg),
         'P_deg':        float(P_deg),
+        'disk': {'cx': float(cx), 'cy': float(cy), 'r_px': float(r_px)}, #added
         'holes':        holes
     }
     return result
@@ -349,14 +411,33 @@ def plot_structures(generator, mask, image, instrument: str, data: dict):
     generator.eval()
 
     img = image.squeeze().cpu().numpy()
+    #image_bytes = image.squeeze().cpu().numpy()
+    #nparr = np.frombuffer(image_bytes, np.uint8)
+    #img = cv2.imdecode(img, cv2.IMREAD_GRAYSCALE)
     mask_bin = mask.squeeze().cpu().numpy()
 
     # Detect disk for plotting
-    if instrument.lower() == 'aia':
-        cx, cy, r_px = detect_aia_disk_hough(img)
-    else:
-        cx, cy, r_px = detect_suvi_disk_precise(img)
-        r_px *= shrink_factor_suvi
+    #if instrument.lower() == 'aia':
+    #    cx, cy, r_px = detect_aia_disk_hough(img)
+    #else:
+    #    cx, cy, r_px = detect_suvi_disk_precise(img)
+    #    r_px *= shrink_factor_suvi
+
+    # použi disk z analýzy (fallback na detekciu, ak by chýbal)
+    cx = data.get('disk', {}).get('cx')
+    cy = data.get('disk', {}).get('cy')
+    r_px = data.get('disk', {}).get('r_px')
+    if cx is None or cy is None or r_px is None:
+        inst_lower = instrument.lower()
+        if inst_lower == 'aia':
+            res = detect_aia_disk_hough(img)
+        else:
+            res = detect_suvi_disk_precise(img)
+        if res is None:
+            raise ValueError("Solar disk not detected (plot).")
+        cx, cy, r_px = res
+        if inst_lower != 'aia':
+            r_px *= shrink_factor_suvi
 
     # Prepare the figure
     fig, axs = plt.subplots(1, 3, figsize=(20, 5))  # 3 columns
@@ -374,26 +455,44 @@ def plot_structures(generator, mask, image, instrument: str, data: dict):
     axs[1].set_title('Prediction Mask')
     axs[1].axis('off')
 
+
+
     # Plot the image with holes
-    overlay = np.zeros((*mask_bin.shape, 3), dtype=np.float32)
-    overlay[..., 0] = mask_bin  # Red channel for holes
-    axs[2].imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
-    axs[2].imshow(overlay, alpha=0.5)
+    #overlay = np.zeros((*mask_bin.shape, 3), dtype=np.float32)
+    #overlay[..., 0] = mask_bin  # Red channel for holes
+    #axs[2].imshow(img, cmap='gray', vmin=vmin, vmax=vmax)
+    #axs[2].imshow(overlay, alpha=0.5)
+
+    axs[2].imshow(img, cmap='gray')
+    circ = patches.Circle((cx, cy), r_px, edgecolor='white', facecolor='none', linewidth=2)
+    axs[2].add_patch(circ)
+
+    # obrysy dier (rovnaká morfológia a binarita ako v analýze)
+    m_closed = cv2.morphologyEx(mask_bin, cv2.MORPH_CLOSE, close_kernel)
+    m_opened = cv2.morphologyEx(m_closed,  cv2.MORPH_OPEN,  open_kernel)
+    m_proc   = (m_opened > 0).astype(np.uint8)
+    axs[2].contour(m_proc, levels=[0.5], colors='red', linewidths=1.5)
+
     axs[2].set_title('Image with detected structures')
     axs[2].axis('off')
 
     # Annotate holes
-    for hole in data['holes']:
+    #for hole in data['holes']:
+    for hole in data.get('holes', []):
         cx_px, cy_px = hole['centroid_px']
         lat, lon = hole['latitude'], hole['longitude']
         area_mm2 = hole['area_mm2']
         #axs[2].plot(cx_px, cy_px, 'o', markeredgecolor='yellow', markerfacecolor='none', markersize=10)
-        axs[2].text(cx_px + 5, cy_px + 5,
-                    f"{hole['label']}: {area_mm2:.1f}Mm²",
-                    color='yellow', fontsize=7)
+        #axs[2].text(cx_px + 5, cy_px + 5,
+        #            f"{hole['label']}: {area_mm2:.1f}Mm²",
+        #            color='yellow', fontsize=7)
 
+        axs[2].text(cx_px+5, cy_px+5,
+                f"{hole['label']}: {area_mm2:.1f}Mm²\n{lat:.1f}°, {lon:.1f}°",
+                color='yellow', fontsize=9, weight='bold')
     # Add title
     title = f"{data['obs_time']}  B0={data['B0_deg']:.2f}° P={data['P_deg']:.2f}°"
+
     fig.suptitle(title, fontsize=12)
     plt.tight_layout()
     #plt.show()
@@ -481,7 +580,7 @@ def predict():
 
         pred_np = pred_bin.cpu().numpy()
 
-    # For Coronal Holes (CH) detection, we use a specific model.
+    #+
     else:
 
         if threshold_param == "conservative":
